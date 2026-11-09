@@ -115,6 +115,22 @@ func main() {
 }
 ```
 
+### 目标地址与实际连接地址（新增只读 API）
+
+`GetPeerEndpoints(attrs, kind)` 可同时提取逻辑访问目标（`Target.Address / Target.Port`）与实际网络连接（`Network.Address / Network.Port`）；端口使用 `HasPort` 表示是否存在。兼容 `server.*`、`network.peer.*` 与对应历史 `net.peer.*` / `net.sock.peer.*` 字段，不拆分 Redis Cluster/Sentinel 组合目标。
+
+```go
+endpoints := otlpmap.GetPeerEndpoints(span.Attributes(), span.Kind())
+target := endpoints.Target.Address   // 可能是 redis.prod.internal 或 Redis Cluster 组合目标
+network := endpoints.Network.Address // 可能是 192.0.2.10
+if endpoints.Network.HasPort {
+    _ = endpoints.Network.Port
+}
+_, _ = target, network
+```
+
+该 API **不会改变原有 13 个 `peer.*` 字段及 flattened fingerprint**；下游若只消费 `GetPeerTags`，需要主动接入此新 API 才能获取实际连接端点。完整契约、字段来源、Java Agent v2.32.0 测试依据与待完成的生产链路验证见 [Peer Endpoint 设计与验证](docs/peer-endpoints.md)。
+
 ### 出站 Peer 的 4 种消费模式
 
 针对出站 Span（`Client`、`Producer`、`Consumer`），库提供了 4 种互斥的消费模式，请根据场景选择一种，**切勿在同一条 span 热路径上重叠调用**：
