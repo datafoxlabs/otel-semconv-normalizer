@@ -28,6 +28,20 @@ In particular, **`net.peer.port` on CLIENT spans maps to `server.port`**, not
 therefore does *not* create an inferred socket address-and-port pair. No source
 is reassigned across the target/network boundary.
 
+When both canonical and legacy address attributes are present but disagree,
+the preferred address is retained. A missing/invalid **canonical** port is not
+filled from the **legacy** port if that port would be paired with a conflicting
+legacy address. In that case `HasPort=false` (and `Port=0`), rather than an
+invented endpoint. The inverse is not needed: a valid canonical port remains
+paired with its canonical address, even if obsolete legacy addresses disagree.
+Missing alternate addresses do not by themselves prove a conflict.
+
+Example: `network.peer.address=192.0.2.10`,
+`net.sock.peer.addr=192.0.2.20`, and `net.sock.peer.port=6380` yield
+`Network.Address=192.0.2.10` and `Network.HasPort=false`.
+The same rule applies to conflicting `server.address` vs
+`net.peer.name` when only `net.peer.port` is available.
+
 Only valid integer ports in [1, 65535] are accepted. `HasPort` distinguishes
 missing/invalid ports from a present port. Both endpoints can be partially
 populated; this API does not infer missing addresses, perform DNS resolution or
