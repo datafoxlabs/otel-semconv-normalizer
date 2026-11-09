@@ -47,9 +47,9 @@ func TestGetPeerEndpoints(t *testing.T) {
 			name: "legacy client aliases keep distinct meanings",
 			kind: ptrace.SpanKindClient,
 			attrs: map[string]any{
-				"net.peer.name":     "redis.old.internal",
-				"net.peer.port":     int64(6379),
-				"net.peer.ip":       "192.0.2.12",
+				"net.peer.name":      "redis.old.internal",
+				"net.peer.port":      int64(6379),
+				"net.peer.ip":        "192.0.2.12",
 				"net.sock.peer.port": int64(6381),
 			},
 			want: PeerEndpoints{
@@ -66,6 +66,108 @@ func TestGetPeerEndpoints(t *testing.T) {
 			},
 			want: PeerEndpoints{Network: PeerEndpoint{
 				Address: "192.0.2.13", Port: 6379, HasPort: true,
+			}},
+		},
+		{
+			name: "different network addresses do not inherit socket port",
+			kind: ptrace.SpanKindClient,
+			attrs: map[string]any{
+				"network.peer.address": "192.0.2.10",
+				"net.sock.peer.addr":   "192.0.2.20",
+				"net.sock.peer.port":   int64(6380),
+			},
+			want: PeerEndpoints{Network: PeerEndpoint{Address: "192.0.2.10"}},
+		},
+		{
+			name: "different target addresses do not inherit legacy port",
+			kind: ptrace.SpanKindClient,
+			attrs: map[string]any{
+				"server.address": "mysql.prod.internal",
+				"net.peer.name":  "mysql.old.internal",
+				"net.peer.port":  int64(3307),
+			},
+			want: PeerEndpoints{Target: PeerEndpoint{Address: "mysql.prod.internal"}},
+		},
+		{
+			name: "matching target addresses allow legacy port",
+			kind: ptrace.SpanKindClient,
+			attrs: map[string]any{
+				"server.address": "mysql.prod.internal",
+				"net.peer.name":  "mysql.prod.internal",
+				"net.peer.port":  int64(3306),
+			},
+			want: PeerEndpoints{Target: PeerEndpoint{
+				Address: "mysql.prod.internal", Port: 3306, HasPort: true,
+			}},
+		},
+		{
+			name: "matching network addresses allow socket port",
+			kind: ptrace.SpanKindClient,
+			attrs: map[string]any{
+				"network.peer.address": "192.0.2.10",
+				"net.sock.peer.addr":   "192.0.2.10",
+				"net.sock.peer.port":   int64(6380),
+			},
+			want: PeerEndpoints{Network: PeerEndpoint{
+				Address: "192.0.2.10", Port: 6380, HasPort: true,
+			}},
+		},
+		{
+			name: "no competing target address allows partial legacy port",
+			kind: ptrace.SpanKindClient,
+			attrs: map[string]any{
+				"server.address": "mysql.prod.internal",
+				"net.peer.port":  int64(3306),
+			},
+			want: PeerEndpoints{Target: PeerEndpoint{
+				Address: "mysql.prod.internal", Port: 3306, HasPort: true,
+			}},
+		},
+		{
+			name: "conflicting legacy peer IP without socket address blocks socket port",
+			kind: ptrace.SpanKindClient,
+			attrs: map[string]any{
+				"network.peer.address": "192.0.2.10",
+				"net.peer.ip":          "192.0.2.20",
+				"net.sock.peer.port":   int64(6380),
+			},
+			want: PeerEndpoints{Network: PeerEndpoint{Address: "192.0.2.10"}},
+		},
+		{
+			name: "matching socket address wins over unrelated legacy peer IP",
+			kind: ptrace.SpanKindClient,
+			attrs: map[string]any{
+				"network.peer.address": "192.0.2.10",
+				"net.sock.peer.addr":   "192.0.2.10",
+				"net.peer.ip":          "192.0.2.20",
+				"net.sock.peer.port":   int64(6380),
+			},
+			want: PeerEndpoints{Network: PeerEndpoint{
+				Address: "192.0.2.10", Port: 6380, HasPort: true,
+			}},
+		},
+		{
+			name: "canonical network port is used despite conflicting legacy address",
+			kind: ptrace.SpanKindClient,
+			attrs: map[string]any{
+				"network.peer.address": "192.0.2.10",
+				"network.peer.port":    int64(6379),
+				"net.sock.peer.addr":   "192.0.2.20",
+				"net.sock.peer.port":   int64(6380),
+			},
+			want: PeerEndpoints{Network: PeerEndpoint{
+				Address: "192.0.2.10", Port: 6379, HasPort: true,
+			}},
+		},
+		{
+			name: "partial canonical network address accepts legacy socket port without conflict",
+			kind: ptrace.SpanKindClient,
+			attrs: map[string]any{
+				"network.peer.address": "192.0.2.10",
+				"net.sock.peer.port":   int64(6380),
+			},
+			want: PeerEndpoints{Network: PeerEndpoint{
+				Address: "192.0.2.10", Port: 6380, HasPort: true,
 			}},
 		},
 		{
