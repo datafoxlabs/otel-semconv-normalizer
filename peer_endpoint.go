@@ -10,7 +10,8 @@ import (
 // PeerEndpoint is one observed endpoint. Address is preserved verbatim; it can
 // be a hostname, IP, Unix socket path, or a SemConv database target containing
 // multiple configured endpoints. Port is only meaningful when HasPort is true.
-// An address and port are not synthesized by mixing target and network fields.
+// Ports never cross target/network boundaries; legacy port fallbacks are
+// suppressed when the corresponding addresses explicitly disagree.
 type PeerEndpoint struct {
 	Address string
 	Port    uint16
@@ -44,28 +45,48 @@ func GetPeerEndpoints(attrs pcommon.Map, kind ptrace.SpanKind) PeerEndpoints {
 
 	var endpoints PeerEndpoints
 
-	endpoints.Target.Address = peerEndpointString(attrs, "server.address")
-	if endpoints.Target.Address == "" {
-		endpoints.Target.Address = peerEndpointString(attrs, "net.peer.name")
+	targetAddress := peerEndpointString(attrs, "server.address")
+	legacyTargetAddress := peerEndpointString(attrs, "net.peer.name")
+	endpoints.Target.Address = targetAddress
+	if targetAddress == "" {
+		endpoints.Target.Address = legacyTargetAddress
 	}
 	endpoints.Target.Port, endpoints.Target.HasPort = peerEndpointPort(attrs, "server.port")
-	if !endpoints.Target.HasPort {
+	// A legacy port may describe the legacy address rather than the selected
+	// canonical one. Preserve the selected address but do not invent a pair.
+	if !endpoints.Target.HasPort && !peerEndpointAddressConflict(targetAddress, legacyTargetAddress) {
 		endpoints.Target.Port, endpoints.Target.HasPort = peerEndpointPort(attrs, "net.peer.port")
 	}
 
-	endpoints.Network.Address = peerEndpointString(attrs, "network.peer.address")
+	networkAddress := peerEndpointString(attrs, "network.peer.address")
+	socketAddress := peerEndpointString(attrs, "net.sock.peer.addr")
+	legacyPeerIP := peerEndpointString(attrs, "net.peer.ip")
+	endpoints.Network.Address = networkAddress
 	if endpoints.Network.Address == "" {
-		endpoints.Network.Address = peerEndpointString(attrs, "net.sock.peer.addr")
+		endpoints.Network.Address = socketAddress
 	}
 	if endpoints.Network.Address == "" {
-		endpoints.Network.Address = peerEndpointString(attrs, "net.peer.ip")
+		endpoints.Network.Address = legacyPeerIP
 	}
 	endpoints.Network.Port, endpoints.Network.HasPort = peerEndpointPort(attrs, "network.peer.port")
-	if !endpoints.Network.HasPort {
+	// net.sock.peer.port belongs to the legacy socket endpoint. If the
+	// canonical network address disagrees with the legacy socket address,
+	// using its port would fabricate an endpoint. With no socket address,
+	// also reject a fallback when net.peer.ip explicitly disagrees.
+	if !endpoints.Network.HasPort &&
+		!peerEndpointAddressConflict(networkAddress, socketAddress) &&
+		(socketAddress != "" || !peerEndpointAddressConflict(networkAddress, legacyPeerIP)) {
 		endpoints.Network.Port, endpoints.Network.HasPort = peerEndpointPort(attrs, "net.sock.peer.port")
 	}
 
 	return endpoints
+}
+
+// peerEndpointAddressConflict only rejects a proven mismatch. Missing or
+// invalid addresses are not proof of a different endpoint; partial inputs may
+// still use a legacy port when no conflicting address is present.
+func peerEndpointAddressConflict(selected, alternate string) bool {
+	return selected != "" && alternate != "" && selected != alternate
 }
 
 func peerEndpointString(attrs pcommon.Map, key string) string {
