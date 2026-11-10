@@ -27,7 +27,8 @@ type PeerEndpoints struct {
 
 // GetPeerEndpoints extracts both endpoints without mutating span attributes.
 // It does not infer a deployment identity, resolve DNS, split compound database
-// targets, or change the existing GetPeerTags/flattened fingerprint contract.
+// targets, or mutate peer tags. GetPeerTags separately applies the target-first
+// identity policy and may use the Network endpoint as its fallback.
 //
 // Source aliases follow the OpenTelemetry network attribute migration:
 //   - target address: server.address -> net.peer.name
@@ -57,29 +58,36 @@ func GetPeerEndpoints(attrs pcommon.Map, kind ptrace.SpanKind) PeerEndpoints {
 	if !endpoints.Target.HasPort && !peerEndpointAddressConflict(targetAddress, legacyTargetAddress) {
 		endpoints.Target.Port, endpoints.Target.HasPort = peerEndpointPort(attrs, "net.peer.port")
 	}
+	endpoints.Network = getNetworkPeerEndpoint(attrs)
+	return endpoints
+}
 
+// getNetworkPeerEndpoint is shared by the endpoint API and identity fallback;
+// the latter has already ruled out a logical target and needs only this half.
+func getNetworkPeerEndpoint(attrs pcommon.Map) PeerEndpoint {
+	var endpoint PeerEndpoint
 	networkAddress := peerEndpointString(attrs, "network.peer.address")
 	socketAddress := peerEndpointString(attrs, "net.sock.peer.addr")
 	legacyPeerIP := peerEndpointString(attrs, "net.peer.ip")
-	endpoints.Network.Address = networkAddress
-	if endpoints.Network.Address == "" {
-		endpoints.Network.Address = socketAddress
+	endpoint.Address = networkAddress
+	if endpoint.Address == "" {
+		endpoint.Address = socketAddress
 	}
-	if endpoints.Network.Address == "" {
-		endpoints.Network.Address = legacyPeerIP
+	if endpoint.Address == "" {
+		endpoint.Address = legacyPeerIP
 	}
-	endpoints.Network.Port, endpoints.Network.HasPort = peerEndpointPort(attrs, "network.peer.port")
+	endpoint.Port, endpoint.HasPort = peerEndpointPort(attrs, "network.peer.port")
 	// net.sock.peer.port belongs to the legacy socket endpoint. If the
 	// canonical network address disagrees with the legacy socket address,
 	// using its port would fabricate an endpoint. With no socket address,
 	// also reject a fallback when net.peer.ip explicitly disagrees.
-	if !endpoints.Network.HasPort &&
+	if !endpoint.HasPort &&
 		!peerEndpointAddressConflict(networkAddress, socketAddress) &&
 		(socketAddress != "" || !peerEndpointAddressConflict(networkAddress, legacyPeerIP)) {
-		endpoints.Network.Port, endpoints.Network.HasPort = peerEndpointPort(attrs, "net.sock.peer.port")
+		endpoint.Port, endpoint.HasPort = peerEndpointPort(attrs, "net.sock.peer.port")
 	}
 
-	return endpoints
+	return endpoint
 }
 
 // peerEndpointAddressConflict only rejects a proven mismatch. Missing or

@@ -204,16 +204,20 @@ func TestPeerTagsAppendFlattenedPreservesDestinationPrefix(t *testing.T) {
 }
 
 func TestPeerFlattenedOrderMatchesRegistry(t *testing.T) {
-	concepts := make([]string, 0, peerFieldCount)
-	seen := [peerFieldCount]bool{}
+	concepts := make([]string, 0, peerFieldCount+1)
+	seen := [peerFieldCount + 1]bool{}
 	for _, offset := range peerFlattenedOrder {
-		if int(offset) >= peerFieldCount {
+		if int(offset) > peerFieldCount {
 			t.Fatalf("flattened offset %d is outside peer field count %d", offset, peerFieldCount)
 		}
 		if seen[offset] {
 			t.Fatalf("flattened offset %d appears more than once", offset)
 		}
 		seen[offset] = true
+		if int(offset) == peerFieldCount {
+			concepts = append(concepts, string(ConceptPeerPort))
+			continue
+		}
 		fieldID := semconvmeta.CoreFieldCount + semconvmeta.FieldID(offset)
 		concepts = append(concepts, semconvmeta.Field(fieldID).Concept())
 	}
@@ -435,8 +439,8 @@ func TestFlattenedPeerTagsStableAcrossSystemRename(t *testing.T) {
 }
 
 func TestSetPeerTagsWritesFlattened(t *testing.T) {
-	if keyFlattenedPeerTags != "otelmap.flattened.peer.tags" {
-		t.Fatalf("keyFlattenedPeerTags = %q, want Project namespace", keyFlattenedPeerTags)
+	if keyDFFlattenedPeerTags != "_df.flattened.peer.tags" {
+		t.Fatalf("keyDFFlattenedPeerTags = %q, want Project namespace", keyDFFlattenedPeerTags)
 	}
 
 	attrs := testAttrs(map[string]string{
@@ -445,12 +449,12 @@ func TestSetPeerTagsWritesFlattened(t *testing.T) {
 	})
 	SetPeerTags(attrs, ptrace.SpanKindClient)
 
-	got, ok := attrValue(t, attrs, keyFlattenedPeerTags)
+	got, ok := attrValue(t, attrs, keyDFFlattenedPeerTags)
 	if !ok {
-		t.Fatalf("%s not written", keyFlattenedPeerTags)
+		t.Fatalf("%s not written", keyDFFlattenedPeerTags)
 	}
 	if want := "peer.db.system:redis,peer.hostname:localhost"; got != want {
-		t.Fatalf("%s = %q, want %q", keyFlattenedPeerTags, got, want)
+		t.Fatalf("%s = %q, want %q", keyDFFlattenedPeerTags, got, want)
 	}
 	// The peer system is also materialized as its own concept column.
 	if v, _ := attrValue(t, attrs, "peer.db.system"); v != "redis" {
@@ -460,17 +464,38 @@ func TestSetPeerTagsWritesFlattened(t *testing.T) {
 
 func TestSetPeerTagsRemovesStaleFlattenedWhenProjectionIsEmpty(t *testing.T) {
 	attrs := testAttrs(map[string]string{
-		keyFlattenedPeerTags: "peer.hostname:stale.example",
-		keyHTTPRoute:         "/orders/{id}",
+		keyDFFlattenedPeerTags: "peer.hostname:stale.example",
+		keyHTTPRoute:           "/orders/{id}",
 	})
 
 	SetPeerTags(attrs, ptrace.SpanKindClient)
 
-	if _, ok := attrs.Get(keyFlattenedPeerTags); ok {
-		t.Fatalf("%s retained after the peer projection became empty", keyFlattenedPeerTags)
+	if _, ok := attrs.Get(keyDFFlattenedPeerTags); ok {
+		t.Fatalf("%s retained after the peer projection became empty", keyDFFlattenedPeerTags)
 	}
 	if got, ok := attrValue(t, attrs, keyHTTPRoute); !ok || got != "/orders/{id}" {
 		t.Fatalf("%s = %q ok=%v, want unrelated attribute preserved", keyHTTPRoute, got, ok)
+	}
+}
+
+func TestSetPeerTagsUsesCanonicalFlattenedKey(t *testing.T) {
+	const previousKey = "otelmap.flattened.peer.tags"
+	attrs := testAttrs(map[string]string{keyDBSystem: "redis", keyServerAddress: "cache.internal"})
+	SetPeerTags(attrs, ptrace.SpanKindClient)
+	if _, ok := attrs.Get(previousKey); ok {
+		t.Fatal("SetPeerTags generated the previous flattened key")
+	}
+	current, ok := attrs.Get("_df.flattened.peer.tags")
+	if !ok || current.Str() != "peer.db.system:redis,peer.hostname:cache.internal" {
+		t.Fatalf("canonical flattened field = %v", current)
+	}
+
+	// Existing source extensions are preserved; this API does not migrate them.
+	attrs.PutStr(previousKey, "legacy:unchanged")
+	SetPeerTags(attrs, ptrace.SpanKindClient)
+	previous, _ := attrs.Get(previousKey)
+	if previous.Str() != "legacy:unchanged" {
+		t.Fatal("SetPeerTags rewrote a pre-existing extension")
 	}
 }
 

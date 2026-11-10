@@ -35,4 +35,8 @@ const (
 	// ConceptPeerRocketMQBroker is a Project extension. Datadog does not
 	// currently define an equivalent canonical peer concept.
 	ConceptPeerRocketMQBroker Concept = "peer.rocketmq.broker"
+
+	// ConceptPeerPort is a Project extension. It is the decimal port paired
+	// with a network-fallback peer.hostname, never a configured target port.
+	ConceptPeerPort Concept = "peer.port"
 )

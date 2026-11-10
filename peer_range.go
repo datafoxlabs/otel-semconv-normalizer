@@ -4,6 +4,7 @@ package otlpmap
 
 import (
 	"math/bits"
+	"strconv"
 
 	"github.com/XiaoWeiKIN/otel-semconv-normalizer/internal/semconvmeta"
 	"go.opentelemetry.io/collector/pdata/pcommon"
@@ -11,6 +12,16 @@ import (
 )
 
 const peerFieldCount = int(semconvmeta.FieldCount - semconvmeta.CoreFieldCount)
+
+// A database name, topic or RPC service name alone does not identify a
+// deployment. Explicit logical targets and named cloud resources do.
+const logicalPeerTargetMask uint32 = 1<<(semconvmeta.FieldPeerService-semconvmeta.CoreFieldCount) |
+	1<<(semconvmeta.FieldPeerHostname-semconvmeta.CoreFieldCount) |
+	1<<(semconvmeta.FieldPeerKafkaBootstrapServers-semconvmeta.CoreFieldCount) |
+	1<<(semconvmeta.FieldPeerRocketMQBroker-semconvmeta.CoreFieldCount) |
+	1<<(semconvmeta.FieldPeerAWSDynamoDBTable-semconvmeta.CoreFieldCount) |
+	1<<(semconvmeta.FieldPeerAWSS3Bucket-semconvmeta.CoreFieldCount) |
+	1<<(semconvmeta.FieldPeerAWSKinesisStream-semconvmeta.CoreFieldCount)
 
 type peerAttributeValues struct {
 	values     [peerFieldCount]string
@@ -24,11 +35,15 @@ type peerAttributeValues struct {
 // The snapshot retains selected string values, not the source pcommon.Map.
 type PeerTags struct {
 	attributes peerAttributeValues
+	// Port is a conditional identity extension, not a flat SemConv key alias.
+	port string
 }
 
-// GetPeerTags scans signalAttrs once and returns a read-only snapshot of every
-// non-empty peer concept derived for spanKind. It does not mutate signalAttrs
-// and does not allocate. Only client, producer, and consumer spans yield data.
+// GetPeerTags returns a read-only snapshot of every non-empty peer concept.
+// Existing logical targets use one source scan without allocation. Only when
+// none is available does it read network endpoint aliases and fill hostname
+// and, if present, a decimal port string. Formatting that port may allocate.
+// It does not mutate signalAttrs. Only client/producer/consumer spans yield data.
 func GetPeerTags(signalAttrs pcommon.Map, spanKind ptrace.SpanKind) PeerTags {
 	if signalAttrs.Len() == 0 || !isPeerSpanKind(spanKind) {
 		return PeerTags{}
@@ -47,11 +62,24 @@ func getPeerTags(signalAttrs pcommon.Map) PeerTags {
 		return true
 	})
 	tags.attributes.canonicalizeTechnologies()
+	if tags.attributes.present&logicalPeerTargetMask != 0 {
+		return tags
+	}
+
+	endpoint := getNetworkPeerEndpoint(signalAttrs)
+	if endpoint.Address == "" {
+		return tags
+	}
+	tags.attributes.set(semconvmeta.FieldPeerHostname, 0, endpoint.Address)
+	if endpoint.HasPort {
+		tags.port = strconv.Itoa(int(endpoint.Port))
+	}
 	return tags
 }
 
-// Range calls yield for every concept in the snapshot's stable semconvmeta
-// field order. Returning false stops iteration. Range does not allocate.
+// Range calls yield in the existing semconvmeta field order, followed by the
+// optional peer.port extension. Returning false stops iteration. No allocation
+// occurs during iteration.
 func (tags PeerTags) Range(yield func(Concept, string) bool) {
 	// Clear the lowest set bit on each iteration, preserving field order while
 	// skipping absent concepts.
@@ -64,12 +92,15 @@ func (tags PeerTags) Range(yield func(Concept, string) bool) {
 			return
 		}
 	}
+	if tags.port != "" {
+		yield(ConceptPeerPort, tags.port)
+	}
 }
 
 // RangePeerAttributes calls yield for every non-empty peer concept derived
-// from signalAttrs. It scans signalAttrs once, does not mutate it, and emits
-// concepts in the stable semconvmeta field order. Returning false stops
-// iteration.
+// from signalAttrs using the same target-first contract as GetPeerTags. It
+// does not mutate input and uses the same stable order as PeerTags.Range.
+// Returning false stops iteration.
 func RangePeerAttributes(
 	signalAttrs pcommon.Map,
 	spanKind ptrace.SpanKind,

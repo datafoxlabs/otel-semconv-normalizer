@@ -49,10 +49,10 @@
 
 ## 核心特性
 
-- **零堆分配的分类与只读枚举**：输入直接基于 Collector `pcommon.Map` 与 `ptrace.SpanKind`；分类查找和只读 Peer 枚举的分配边界见[热路径契约](#零堆分配0-alloc热路径契约)，完整 Span 投影的实测分配见[性能基准](#性能基准与复现)。
+- **分类与 Peer 快照的分配边界**：输入直接基于 Collector `pcommon.Map` 与 `ptrace.SpanKind`；分类查找和只读 Peer 枚举的分配边界见[热路径契约](#零堆分配0-alloc热路径契约)，完整 Span 投影的实测分配见[性能基准](#性能基准与复现)。
 - **双正交分类模型**：独立拆分细粒度技术轴（`technology`）与有界角色轴（`entity_type`），彻底解决传统映射中技术被强行坍缩或角色污染的问题。
 - **双代兼容与跨版本平滑演进**：以 **SemConv v1.41.0** 为 canonical 基准，所有查找均保证“新属性优先、旧属性兜底”，自动统一 1.30 等跨版本厂商命名变更（如 `mssql` 统一为 `microsoft.sql_server`）。
-- **完整的出站对端识别 (`peer.*`)**：覆盖 13 个标准对端属性提取，支持高吞吐快照枚举、指纹生成及 ClickHouse ALIAS 读时显示名计算。
+- **完整的出站对端识别 (`peer.*`)**：覆盖原有 13 个对端属性与 Network 补齐端口，支持高吞吐快照枚举、指纹生成及 ClickHouse ALIAS 读时显示名计算。
 - **双层架构按需选用**：
   - **`otlpmap`**（根包）：高吞吐逐 span 派生列提取，专为扁平化宽表落库设计。
   - **`semconvweave`**（子包）：全量属性 Schema 编织归一，构建期编译生成静态决策表，运行时零反射、零动态 Schema 解析。
@@ -129,7 +129,7 @@ if endpoints.Network.HasPort {
 _, _ = target, network
 ```
 
-该 API **不会改变原有 13 个 `peer.*` 字段及 flattened fingerprint**；下游若只消费 `GetPeerTags`，需要主动接入此新 API 才能获取实际连接端点。完整契约、字段来源、Java Agent v2.32.0 测试依据与待完成的生产链路验证见 [Peer Endpoint 设计与验证](docs/peer-endpoints.md)。
+`GetPeerEndpoints` 只读提供端点事实。`GetPeerTags` 和 `GetPeerHostname` 现在统一采用逻辑目标优先规则：缺少目标时以 Network 地址补齐 hostname，并把有效配对端口写为 `peer.port`。已有逻辑目标的身份保持不变，Network-only 输入的身份可能变化。完整规则和验证边界见 [Peer 端点与 Network 身份补齐](docs/peer-endpoints.md)。
 
 ### 出站 Peer 的 4 种消费模式
 
@@ -157,7 +157,7 @@ func readPeerSnapshot(span ptrace.Span, flattenedBuffer []byte) []byte {
 	return flattenedBuffer
 }
 
-// 模式 3：兼容批量迭代 API（仅需批量枚举已有 13 个 concept，0 Allocation）
+// 模式 3：兼容批量迭代 API（批量枚举 peer concepts；Network 端口格式化可能分配内存）
 func readPeerWithCompatibilityAPI(span ptrace.Span) {
 	otlpmap.RangePeerAttributes(span.Attributes(), span.Kind(), func(concept otlpmap.Concept, value string) bool {
 		// 消费非空 concept
@@ -167,7 +167,7 @@ func readPeerWithCompatibilityAPI(span ptrace.Span) {
 
 // 模式 4：显式写回模式（opt-in：确实需要原地增强/改写 pdata attributes，会分配并 mutate）
 func enrichPeerAttributes(span ptrace.Span) {
-	// 在 span.Attributes() 原地写入 13 个 peer.* 以及 otelmap.flattened.peer.tags 指纹
+	// 在 span.Attributes() 原地写入非空 peer.* 以及 _df.flattened.peer.tags 指纹
 	otlpmap.SetPeerTags(span.Attributes(), span.Kind())
 }
 ```
@@ -296,8 +296,8 @@ flowchart LR
     Attrs["span attributes + kind"] --> Get["GetPeerTags"]
     Get --> Gate{"Client / Producer / Consumer?"}
     Gate -->|"否"| Empty["所有 peer.* 返回空"]
-    Gate -->|"是"| Snapshot["单次扫描、只读值快照 (PeerTags)"]
-    Snapshot --> Range["Range：13 个独立 peer.* concepts"]
+    Gate -->|"是"| Snapshot["逻辑目标优先，缺失时补 Network，生成只读快照"]
+    Snapshot --> Range["Range：非空 peer.* concepts"]
     Snapshot --> Flat["AppendFlattened：排序指纹字节"]
     Range --> Persist["ClickHouse / 存储落库"]
     Flat --> Persist
@@ -305,12 +305,13 @@ flowchart LR
     Attrs --> Name["GetPeerName：独立呈现命名（只读 opt-in）"]
 ```
 
-#### 13 个 Peer 规范 Concepts
+#### 14 个 Peer Concepts（含项目扩展）
 
 | 输出 Concept / 列 | 提取函数 | 来源属性顺序与规则 |
 | :--- | :--- | :--- |
 | `peer.service` | `GetPeerService` | `peer.service`（v1.39 已废弃，兼容期内持续读取） |
-| `peer.hostname` | `GetPeerHostname` | `server.address → net.peer.name`（原值输出，不拼端口） |
+| `peer.hostname` | `GetPeerHostname` | `server.address → net.peer.name`；缺少逻辑目标时补 Network 地址，原值输出、不拼端口 |
+| `peer.port` | `GetPeerPort` | 仅 Network 补齐分支写入配对的有效端口，十进制字符串；本项目扩展 |
 | `peer.db.name` | `GetPeerDBName` | `db.namespace → db.name` |
 | `peer.messaging.destination` | `GetPeerMessagingDestination` | `messaging.destination.name → messaging.destination` |
 | `peer.rpc.service` | `GetPeerRPCService` | `rpc.service`（v1.39 已废弃，兼容期内持续读取） |
@@ -322,6 +323,11 @@ flowchart LR
 | `peer.db.system` | `GetPeerDBSystem` | `db.system.name → db.system → db.type`（值经拼写规范化） |
 | `peer.messaging.system` | `GetPeerMessagingSystem` | `messaging.system`（值经拼写规范化） |
 | `peer.rpc.system` | `GetPeerRPCSystem` | `rpc.system.name → rpc.system`（值经拼写规范化） |
+
+逻辑目标包括 hostname、显式 `peer.service`、bootstrap、broker 和已有云资源标识。
+只有库名、topic 或类型时仍会补齐连接端点。`ip:port,ip:port` 等组合目标整体保留，
+不拆分、不排序，也不追加某次连接的 Network IP。规则详见
+[Peer 端点与 Network 身份补齐](docs/peer-endpoints.md)。
 
 #### 端点字段的 OTel 官方迁移依据 (`server.address` & `server.port`)
 
@@ -533,7 +539,7 @@ python3 benchmarks/suites/b-001_span-projection/scripts/run_selective.py "$bench
 分配边界取决于具体入口、输入类型和目标切片容量。完整 Span 投影会创建独立持有数据的 Map，其 `B/op` 与 `allocs/op` 已列在上面的对比表中。
 
 - **分类查找**：`GetTechnology`、`GetEntityType` 的关键 current/legacy 字符串属性路径由 [`testing.AllocsPerRun` 测试](compatibility_benchmark_test.go)断言零分配。
-- **快照复用**：`GetPeerTags` 产出只读快照；`PeerTags.AppendFlattened(dst)` 在调用方提供足够剩余容量时零分配，容量不足则会增长切片。见[容量边界测试](peer_tags_test.go)。
+- **快照复用**：`GetPeerTags` 产出只读快照；Network 补齐分支将整数端口转为字符串时可能分配内存。`PeerTags.AppendFlattened(dst)` 在调用方提供足够剩余容量时零分配，容量不足则会增长切片。见[容量边界测试](peer_tags_test.go)。
 - **需要分配的入口**：`GetFlattenedPeerTags` 在有值时生成字符串，`SetPeerTags` 写入属性 Map，`ProjectSpan` 构造独立输出。应按具体 API 和输入测量，不能把分类路径的零分配结论推广到全部 `Get*` 或完整投影。
 
 ### 基数与 PII 安全边界
@@ -577,7 +583,9 @@ flowchart LR
 | | `GetDBQuerySummary` | `attrs` | `string`：SQL 概要摘要 |
 | | `GetDBQueryText` | `attrs` | `string`：已清洗的 SQL 原文 |
 | **出站 Peer** | `GetPeerService` | `attrs, kind` | `string`：对端服务名 |
-| | `GetPeerHostname` | `attrs, kind` | `string`：对端主机 / 地址 |
+| | `GetPeerHostname` | `attrs, kind` | `string`：逻辑目标优先的对端地址 |
+| | `GetPeerPort` | `attrs, kind` | `string`：仅 Network 补齐时的配对端口 |
+| | `GetPeerEndpoints` | `attrs, kind` | `PeerEndpoints`：独立的 Target 与 Network 端点 |
 | | `GetPeerDBName` / `GetPeerDBSystem` | `attrs, kind` | `string`：对端 DB 库名与系统类型 |
 | | `GetPeerMessagingDestination` | `attrs, kind` | `string`：消息队列 Topic / Queue 名 |
 | | `GetPeerMessagingSystem` | `attrs, kind` | `string`：消息中间件系统类型 |
@@ -587,9 +595,9 @@ flowchart LR
 | | `GetPeerKafkaBootstrapServers` | `attrs, kind` | `string`：Kafka Broker 列表（实验性） |
 | | `GetPeerRocketMQBroker` | `attrs, kind` | `string`：RocketMQ Broker 地址（实验性） |
 | | `GetPeerTags` | `attrs, kind` | `PeerTags`：只读值快照（支持 `Range` 与 `AppendFlattened`） |
-| | `RangePeerAttributes` | `attrs, kind, yield` | 批量遍历非空 peer concepts（0 alloc） |
+| | `RangePeerAttributes` | `attrs, kind, yield` | 批量遍历非空 peer concepts；Network 端口格式化可能分配内存 |
 | | `GetFlattenedPeerTags` | `attrs, kind` | `string`：排序后的 `name:value` 指纹字符串 |
-| | `SetPeerTags` | `attrs, kind` | **原地改写**：写回 13 个 `peer.*` 属性与指纹键 |
+| | `SetPeerTags` | `attrs, kind` | **原地改写**：写回非空 `peer.*` 属性与指纹键 |
 | | `GetPeerName` | `attrs, kind` | `string`：按优先级挑选的单个呈现名（建议查询侧算） |
 | **服务与环境** | `GetServiceName` | `resAttrs pcommon.Map` | `string`：服务名（缺省 `unknown_service`） |
 | | `GetDeploymentEnvironmentName` | `resAttrs` | `string`：部署环境（缺省 `default`） |
@@ -604,9 +612,17 @@ flowchart LR
 
 使用 `github.com/XiaoWeiKIN/otel-semconv-normalizer`。首次公开快照不继承此前版本标签。
 
-公开版本的 `SetPeerTags` 将排序后的对端标签写入 `otelmap.flattened.peer.tags`。该键属于本项目扩展；它只写入这个公开键，不迁移或删除调用方已有的其他扩展属性。标准 `peer.*` 键与 Go 函数签名保持不变。
+### 2. Peer 身份与 flattened 字段的兼容性
 
-### 2. API 命名收口与破坏性变更
+`SetPeerTags` 统一写入 `_df.flattened.peer.tags`，替代此前公开快照使用的
+`otelmap.flattened.peer.tags`。调用方需要更新读取和持久化字段映射；本库不双写旧键，
+不迁移历史数据，也不自动删除源 Span 已携带的旧扩展属性。
+
+同时，Network-only 输入会补齐 `peer.hostname` 与可用的 `peer.port`，因此完整 peer
+身份可能变化。已有逻辑目标的 peer 集合和 flattened 内容保持不变。Go 调用签名继续
+兼容，新增 `GetPeerPort`；具体规则和测试边界见 [端点合同](docs/peer-endpoints.md)。
+
+### 3. API 命名收口与破坏性变更
 为了使语义与 Datadog 及 OpenTelemetry 规范保持严密一致，以下历史 API 已在当前版本中收口：
 - `GetPeerAddress` **已更名为** `GetPeerHostname`（输出概念对应对齐为 `peer.hostname`）。
 - `GetDeploymentEnvironment` **已更名为** `GetDeploymentEnvironmentName`（默认常量同步更名为 `DefaultDeploymentEnvironmentName`）。

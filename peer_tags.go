@@ -8,24 +8,25 @@ import (
 	"go.opentelemetry.io/collector/pdata/ptrace"
 )
 
-// peerFlattenedOrder is the package-private static lexical order of the 13 peer
+// peerFlattenedOrder is the package-private static lexical order of the peer
 // concept names. Keeping sorting out of the per-span hot path avoids repeated
 // work. Registry tests assert that it remains complete and sorted as concepts
 // evolve.
-var peerFlattenedOrder = [peerFieldCount]uint8{
-	5,  // peer.aws.dynamodb.table
-	7,  // peer.aws.kinesis.stream
-	6,  // peer.aws.s3.bucket
-	2,  // peer.db.name
-	8,  // peer.db.system
-	1,  // peer.hostname
-	11, // peer.kafka.bootstrap.servers
-	3,  // peer.messaging.destination
-	9,  // peer.messaging.system
-	12, // peer.rocketmq.broker
-	4,  // peer.rpc.service
-	10, // peer.rpc.system
-	0,  // peer.service
+var peerFlattenedOrder = [peerFieldCount + 1]uint8{
+	5,                     // peer.aws.dynamodb.table
+	7,                     // peer.aws.kinesis.stream
+	6,                     // peer.aws.s3.bucket
+	2,                     // peer.db.name
+	8,                     // peer.db.system
+	1,                     // peer.hostname
+	11,                    // peer.kafka.bootstrap.servers
+	3,                     // peer.messaging.destination
+	9,                     // peer.messaging.system
+	uint8(peerFieldCount), // peer.port, owned by the identity extension
+	12,                    // peer.rocketmq.broker
+	4,                     // peer.rpc.service
+	10,                    // peer.rpc.system
+	0,                     // peer.service
 }
 
 // AppendFlattened appends the snapshot as lexically sorted "name:value" pairs
@@ -35,6 +36,18 @@ var peerFlattenedOrder = [peerFieldCount]uint8{
 func (tags PeerTags) AppendFlattened(dst []byte) []byte {
 	wrotePair := false
 	for _, offset := range peerFlattenedOrder {
+		if int(offset) == peerFieldCount {
+			if tags.port != "" {
+				if wrotePair {
+					dst = append(dst, ',')
+				}
+				dst = append(dst, string(ConceptPeerPort)...)
+				dst = append(dst, ':')
+				dst = append(dst, tags.port...)
+				wrotePair = true
+			}
+			continue
+		}
 		if tags.attributes.present&(uint32(1)<<offset) == 0 {
 			continue
 		}
@@ -55,7 +68,7 @@ func (tags PeerTags) AppendFlattened(dst []byte) []byte {
 func (tags PeerTags) flattenedSize() int {
 	size := 0
 	for _, offset := range peerFlattenedOrder {
-		if tags.attributes.present&(uint32(1)<<offset) == 0 {
+		if int(offset) == peerFieldCount || tags.attributes.present&(uint32(1)<<offset) == 0 {
 			continue
 		}
 		fieldID := semconvmeta.CoreFieldCount + semconvmeta.FieldID(offset)
@@ -66,13 +79,19 @@ func (tags PeerTags) flattenedSize() int {
 		}
 		size += len(field.Concept()) + 1 + len(value)
 	}
+	if tags.port != "" {
+		if size != 0 {
+			size++
+		}
+		size += len(ConceptPeerPort) + 1 + len(tags.port)
+	}
 	return size
 }
 
 // GetFlattenedPeerTags returns the flattened peer tags of an outbound span: the
 // matching peer.* concepts as sorted "name:value" pairs joined by commas (e.g.
 // "peer.db.system:redis,peer.hostname:localhost"). The returned value is stored
-// under the Project-owned otelmap.flattened.peer.tags key by SetPeerTags; Datadog
+// under the Project-owned _df.flattened.peer.tags key by SetPeerTags; Datadog
 // computes the equivalent matching peer-tag set internally rather than emitting
 // this attribute.
 //
@@ -90,17 +109,17 @@ func GetFlattenedPeerTags(signalAttrs pcommon.Map, spanKind ptrace.SpanKind) str
 }
 
 // SetPeerTags writes the peer.* projection of an outbound span back onto
-// signalAttrs, mirroring how the DataDog agent surfaces peer concepts for
-// aggregation.
+// signalAttrs. Alongside the existing peer concepts, missing logical targets
+// may produce a network hostname and Project's peer.port extension.
 //
 // Unlike the read-only GetPeer* getters, SetPeerTags MUTATES signalAttrs. It is an
-// explicit, opt-in step kept out of the zero-allocation read core: PutStr grows
-// the map and allocates, so callers invoke it at an ingestion or landing
+// explicit, opt-in step kept out of the read core: PutStr grows the map and
+// allocates, so callers invoke it at an ingestion or landing
 // boundary, never on the hot read path.
 //
 // It writes each present, non-empty peer.* concept under its concept name
 // (peer.service, peer.hostname, peer.db.system, ...) and the flattened set under
-// otelmap.flattened.peer.tags. Values are not transformed again here: no IP
+// _df.flattened.peer.tags. Values are not transformed again here: no IP
 // quantization, cardinality bounding, or peer.service length normalization is
 // applied. The distribution contract requires the OTel Agent to sanitize IP
 // data before export; deployment-owned grouping stays downstream.
@@ -112,6 +131,9 @@ func SetPeerTags(signalAttrs pcommon.Map, spanKind ptrace.SpanKind) {
 		return
 	}
 	tags := getPeerTags(signalAttrs)
+	if tags.port == "" {
+		signalAttrs.Remove(string(ConceptPeerPort))
+	}
 	tags.Range(func(concept Concept, value string) bool {
 		key := string(concept)
 		signalAttrs.PutStr(key, value)
@@ -119,9 +141,9 @@ func SetPeerTags(signalAttrs pcommon.Map, spanKind ptrace.SpanKind) {
 	})
 	size := tags.flattenedSize()
 	if size == 0 {
-		signalAttrs.Remove(keyFlattenedPeerTags)
+		signalAttrs.Remove(keyDFFlattenedPeerTags)
 		return
 	}
 	flattened := tags.AppendFlattened(make([]byte, 0, size))
-	signalAttrs.PutStr(keyFlattenedPeerTags, string(flattened))
+	signalAttrs.PutStr(keyDFFlattenedPeerTags, string(flattened))
 }
