@@ -6,6 +6,9 @@
 
 例如，订单服务发起了一次 MySQL 查询。即使 MySQL 本身没有上报追踪数据，只要客户端记录了数据库类型和库名，系统就能在拓扑图上自动绘制出名为 `orders` 的 MySQL 依赖节点。
 
+本库负责生成 peer 属性和显示名；节点聚合、边关联及拓扑展示由调用方完成。
+显示名相同不表示身份相同，身份应使用完整的最终 peer 属性集合。
+
 ---
 
 ## 1. 核心概念：三个识别维度
@@ -94,13 +97,26 @@ flowchart TD
 
 | 上报信息 | 推断服务名称 | 精度等级 | 呈现效果 |
 | :--- | :--- | :--- | :--- |
-| 包含数据库名 `orders` + 主机 `db-1.internal` | `orders` | **高（逻辑实体）** | 精准区分业务数据库，不同调用汇聚到对应业务库 |
+| 包含数据库名 `orders` + 主机 `db-1.internal` | `orders` | **高（逻辑实体）** | 名称为库名；身份仍包含主机，不同主机上的同名库不会仅因名称相同而合并 |
 | 仅包含主机 `db-1.internal` | `db-1.internal` | **中（网络节点）** | 识别到具体机器实例，但无法区分机器内的具体数据库 |
 | 仅包含组件类型 `mysql` | `mysql` | **低（技术兜底）** | 所有未上报库名和地址的调用均汇聚到一个叫 `mysql` 的通用节点 |
-| 显式配置 `peer.service: order-master` | `order-master` | **自定义（业务视角）** | 业务完全自主掌控显示名称，不受连接信息变动影响 |
+| 显式配置 `peer.service: order-master` | `order-master` | **自定义（业务视角）** | 业务指定显示名称；已有的其他 peer 属性仍参与身份 |
 
 > [!TIP]
-> **主机地址规则**：以主机地址作为名称兜底时，系统**不拼接端口**（如识别为 `api.example.com` 而非 `api.example.com:443`），防止同一服务的不同连接端口导致节点分散。
+> **主机地址规则**：系统不主动给地址拼接端口。Network 补齐时，有效配对端口作为独立的 `peer.port` 参与身份；已有组合地址原样保留。
+
+### 3.4 逻辑目标优先，缺少时补齐 Network
+
+已有 hostname、显式 `peer.service`、Kafka bootstrap、RocketMQ broker 或云资源标识时，
+保持原有 peer 身份，不追加某次连接的 Network 地址。缺少这些逻辑目标时，
+将 Network 地址补为 `peer.hostname`，并将有效的配对端口补为字符串 `peer.port`。
+只有类型、库名、topic 或 RPC 接口名时仍需补齐端点。
+
+例如，只有 `db.system=redis` 和 Network `192.0.2.10:6379` 时，最终 peer 属性为
+`peer.db.system=redis`、`peer.hostname=192.0.2.10`、`peer.port="6379"`。
+MySQL 两个同名 `orders` 数据库可显示相同名称，但其地址或端口不同就有不同身份。
+只有连接端点时不推断集群归属；配置中的 `ip:port,ip:port` 整体保留，不拆成多个节点。
+完整来源优先级、规则和验证边界见 [Peer 端点合同](peer-endpoints.md)。
 
 ---
 
@@ -113,7 +129,8 @@ flowchart TD
 | Peer 属性 (`peer.*`) | 对应的来源属性 (Precursor Attributes) | 适用组件 / 含义 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `peer.service` | `peer.service` | 显式远端服务名 | 业务显式覆盖名称，跨领域最高优先级 |
-| `peer.hostname` | `server.address` → `net.peer.name` | 目标主机名 / IP | 远端域名或主机 IP（不带端口） |
+| `peer.hostname` | `server.address` → `net.peer.name`；缺少逻辑目标时补 Network 地址 | 目标地址 | 不主动拼接端口，组合目标保留原值 |
+| `peer.port` | Network 补齐分支中配对的 `network.peer.port` → `net.sock.peer.port` | 连接端口 | 有效整数端口输出为十进制字符串；本项目扩展 |
 | `peer.db.name` | `db.namespace` → `db.name` | 数据库名 | 数据库名或命名空间 |
 | `peer.db.system` | `db.system.name` → `db.system` → `db.type` | 数据库技术名 | 数据库系统类型（如 `mysql`, `clickhouse`） |
 | `peer.messaging.destination` | `messaging.destination.name` → `messaging.destination` | 消息目的地 | Topic 或 Queue 名称 |
@@ -125,8 +142,12 @@ flowchart TD
 | `peer.aws.s3.bucket` | `aws.s3.bucket` | S3 存储桶名 | AWS S3 Bucket 名称 |
 | `peer.aws.dynamodb.table` | `aws.dynamodb.table_names` | DynamoDB 表名 | AWS DynamoDB 目标表名 |
 | `peer.aws.kinesis.stream` | `aws.kinesis.stream_name` | Kinesis 流名 | AWS Kinesis 数据流名称 |
-| `peer.aws.sqs.queue` | `messaging.destination.name` | SQS 队列名 | SQS 队列名统一归入消息目的地 |
-| `otelmap.flattened.peer.tags` | *(由上述属性组合生成)* | 拓扑指纹 | 将当前生效的 `peer.*` 拼接为唯一指纹串 |
+| `_df.flattened.peer.tags` | *(由上述属性组合生成)* | flattened 表示 | 将当前生效的 `peer.*` 按键排序并拼接，保持既有格式 |
+
+SQS 使用 `peer.messaging.destination`，不另外生成 `peer.aws.sqs.queue`。
+flattened 格式不转义属性值中的逗号或冒号；需要唯一身份编码时，调用方应对完整 peer
+集合使用确定性编码（例如按键排序的 JSON），不要反向解析 flattened 字符串。
+公开快照原字段 `otelmap.flattened.peer.tags` 的切换说明见 [端点合同](peer-endpoints.md)。
 
 > [!NOTE]
 > **关于 Datadog 私有属性与 IP 处理的对比**：
@@ -151,8 +172,8 @@ flowchart TD
 ## 6. 常见问题解答（FAQ）
 
 ### Q1：为什么拓扑图上出现了很多独立的 IP 节点？
-- **原因**：调用时未采集到数据库名、Topic 名或域名，系统回退到了目标 IP 地址。
-- **解决**：在连接串中补齐数据库名，或将外部接口调用地址改为域名连接，或显式配置 `peer.service`。
+- **原因**：缺少逻辑目标时，身份按实际连接端点区分。即使有库名或 Topic，也不能据此还原缺失的集群归属。
+- **解决**：上报稳定的配置目标、bootstrap 或显式 `peer.service`。仅补库名或 Topic 可以改善显示名，不会自动合并不同连接端点。
 
 ### Q2：为什么所有数据库调用都连到了一个叫 `mysql` 的节点？
 - **原因**：调用记录中既没有数据库名，也没有目标主机地址，推断降级到了最低优先级的技术名兜底。

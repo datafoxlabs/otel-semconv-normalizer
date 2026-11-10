@@ -6,7 +6,7 @@
 
 ## 1. 结论
 
-`GetResourceName`、`GetPeer*`、`GetPeerName` 与 `otelmap.flattened.peer.tags` 返回的是逐 span
+`GetResourceName`、`GetPeer*`、`GetPeerName` 与 `_df.flattened.peer.tags` 返回的是逐 span
 候选值或原始事实，不是“可直接聚合”的类型证明。落库边界必须把两类数据分开：
 
 - **归一维度**：已证明有界，服务于热查询、`GROUP BY` 和聚合表；
@@ -162,15 +162,15 @@ legacy key 的 fallback 仍受上述发行版准入契约约束。
 
 ## 6. Peer 原始事实与聚合身份
 
-当前 13 个 `peer.*` 概念是逐 span 原始事实。系统类型通常较稳定，但身份字段仍需按
-tenant/service/window 实测，不能仅凭字段名判定低基数。
+当前 14 个 `peer.*` 概念（含 Network 补齐的 `peer.port`）是逐 span 原始事实。
+系统类型通常较稳定，但身份字段仍需按 tenant/service/window 实测，不能仅凭字段名判定低基数。
 
 | 输出 | 实际语义 | 聚合策略 |
 | --- | --- | --- |
 | `peer.hostname` | 原始 IP/hostname，可能暴露个人地址或内部拓扑 | otlpmap 原值不改；持久化前按安全策略 redact/tokenize/drop，另增 CIDR/service mapping 列 |
 | `peer.kafka.bootstrap.servers` | broker 集合，顺序也可能变化 | 不作 cluster identity；优先稳定 cluster ID 或显式映射 |
 | `peer.rocketmq.broker` | 单 broker 地址 | 不把单 broker 直接当 RocketMQ 集群 |
-| `otelmap.flattened.peer.tags` | 所有 present peer facts 的组合指纹，也会复制其中的 PII | 未确认每个组成值已 scrub 时不得持久化；不作低基数实体键 |
+| `_df.flattened.peer.tags` | 所有 present peer facts 的组合指纹，也会复制其中的 PII | 未确认每个组成值已 scrub 时不得持久化；不作低基数实体键 |
 | `GetPeerName` | 按域优先级选择的显示名 | 可能选中 IP、broker 或 destination，不是归一器 |
 | `peer.*.system` | canonicalized 技术类型 | 只允许受控 system 词汇；未知自定义值进入 raw/sentinel，不直接聚合 |
 | service/destination/DB/AWS identity | producer 给出的身份 | 通过 allowlist、服务目录或显式 mapping 后进入 `peer_group` |
@@ -186,7 +186,7 @@ tenant/service/window 实测，不能仅凭字段名判定低基数。
 - Kafka 优先未来进入支持窗口的 `messaging.kafka.cluster.id` 或现有显式集群映射；
 - broker list 排序/格式变化不应制造新的聚合实体；
 - DynamoDB batch 的 getter 只返回首个非空 table，不能据此把多 table batch 聚合为单一对端；
-- 原始 `otelmap.flattened.peer.tags` 在任何组成值未 scrub 时必须 drop。若需要 scrubbed fingerprint，
+- 原始 `_df.flattened.peer.tags` 在任何组成值未 scrub 时必须 drop。若需要 scrubbed fingerprint，
   应从已治理的独立列重新构造并使用新列名，不覆盖原始指纹；
 - 对 fingerprint 求 hash 只适合缩短存储，不解决实体基数或 PII。
 
@@ -280,7 +280,7 @@ policy_version      LowCardinality(String)  -- 可选：支持审计与回滚
 | 未知自定义 `peer.*.system` | allowlist 未命中则 sentinel | 原值按受控 raw 策略保存 |
 | Kafka brokers 调序 | 不把列表当稳定 cluster identity | broker list 只作排障 |
 | RocketMQ 单 broker | 不把 broker 当集群 | broker 地址只作排障 |
-| `otelmap.flattened.peer.tags` 或其 hash | 不作低基数实体键 | 组成值未全部 scrub 时 drop；scrubbed 派生值另列 |
+| `_df.flattened.peer.tags` 或其 hash | 不作低基数实体键 | 组成值未全部 scrub 时 drop；scrubbed 派生值另列 |
 | 5000-byte clamp 后不是有效 UTF-8 | sentinel/drop，不把无效串用于聚合 | 存储要求 UTF-8 时 drop；本库 clamp 契约不变 |
 
 ## 10. Out of Scope

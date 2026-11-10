@@ -55,13 +55,28 @@ func GetPeerService(signalAttrs pcommon.Map, spanKind ptrace.SpanKind) string {
 	return getPeerField(signalAttrs, spanKind, semconvmeta.FieldPeerService)
 }
 
-// GetPeerHostname returns Datadog's canonical peer.hostname concept from the
-// OTel server.address value, falling back to legacy net.peer.name. Despite the
-// concept name, the source may contain a hostname or an IP address. The getter
-// deliberately does not append server.port, quantize IP addresses, or otherwise
-// rewrite the source value.
+// GetPeerHostname returns server.address, falling back to net.peer.name.
+// If no logical peer target is available, it returns the network address
+// selected by GetPeerTags. Composite targets are preserved verbatim; ports
+// are never appended to this value.
 func GetPeerHostname(signalAttrs pcommon.Map, spanKind ptrace.SpanKind) string {
-	return getPeerField(signalAttrs, spanKind, semconvmeta.FieldPeerHostname)
+	if !isPeerSpanKind(spanKind) {
+		return ""
+	}
+	if target := getCanonicalStringField(signalAttrs, semconvmeta.FieldPeerHostname); target != "" {
+		return target
+	}
+	return getPeerTags(signalAttrs).attributes.values[semconvmeta.FieldPeerHostname-semconvmeta.CoreFieldCount]
+}
+
+// GetPeerPort returns the decimal network port paired with a fallback hostname.
+// It returns empty for logical targets, missing addresses or invalid ports.
+// Callers that also need other peer fields should reuse GetPeerTags instead.
+func GetPeerPort(signalAttrs pcommon.Map, spanKind ptrace.SpanKind) string {
+	if !isPeerSpanKind(spanKind) {
+		return ""
+	}
+	return getPeerTags(signalAttrs).port
 }
 
 // GetPeerDBName returns db.namespace, falling back to legacy db.name.

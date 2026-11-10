@@ -20,7 +20,7 @@
 //	GetUserAgentOriginal / GetNetworkProtocolName / GetNetworkTransport
 //	GetDBOperationName / GetDBCollectionName / GetDBNamespace
 //	GetDBQuerySummary / GetDBQueryText
-//	GetPeerService / GetPeerHostname / GetPeerDBName
+//	GetPeerService / GetPeerHostname / GetPeerPort / GetPeerDBName
 //	GetPeerMessagingDestination / GetPeerRPCService
 //	GetPeerAWSDynamoDBTable / GetPeerAWSS3Bucket / GetPeerAWSKinesisStream
 //	GetPeerDBSystem / GetPeerMessagingSystem / GetPeerRPCSystem
@@ -97,20 +97,25 @@
 // instrumentation emit (Kafka migrates to messaging.kafka.cluster.id once that
 // stable attribute lands in the canonical version). The DynamoDB table getter returns the
 // first non-empty string from aws.dynamodb.table_names to preserve a deterministic
-// single value without allocation. These read-only getters never mutate the map
-// and hold the zero-allocation contract.
+// single value without allocation. These read-only getters never mutate the map.
+// GetPeerEndpoints exposes logical Target and contacted Network endpoints with
+// separate, validated optional ports; compound target strings stay opaque.
 //
-// GetPeerTags scans the source map once and returns a read-only value snapshot
-// of the same 13 concepts and precedence rules. A consumer that needs both
+// GetPeerTags preserves the existing 13 concepts and adds Project's peer.port.
+// With a logical target it scans the source map once without allocation. With
+// no logical target it fills peer.hostname from the Network endpoint and writes
+// its valid paired port as a decimal string; formatting the port may allocate.
+// Database names, topics and RPC names alone do not block this fallback.
+// A consumer that needs both
 // independent concepts and the flattened representation should call Range and
 // AppendFlattened on that snapshot: with a sufficiently preallocated byte
-// destination, the complete read path performs no allocation. The snapshot
+// destination, those two methods perform no allocation. The snapshot
 // retains selected strings but does not retain or mutate the source map.
 // RangePeerAttributes remains the compatible one-operation wrapper.
 //
 // SetPeerTags is an explicit, opt-in write-back: it PutStr's each present
-// Datadog-named peer concept and writes the sorted, comma-joined flattened set
-// under the Project-owned otelmap.flattened.peer.tags key (see
+// peer concept and writes the sorted, comma-joined flattened set
+// under the Project-owned _df.flattened.peer.tags key (see
 // GetFlattenedPeerTags). It mutates the map, so it allocates and lives outside
 // the read core; it does not group spans into inferred entities.
 //

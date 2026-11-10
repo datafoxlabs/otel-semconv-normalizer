@@ -94,10 +94,10 @@ const (
 	// SemConv): OTel Java's RocketMQ producer and consumer emit it via their
 	// ExperimentalAttributeExtractor as the broker address handling the message.
 	keyMessagingRocketMQBrokerAddress = "messaging.rocketmq.broker_address"
-	// keyFlattenedPeerTags is a Project extension, not an OTel or Datadog
+	// keyDFFlattenedPeerTags is a Project extension, not an OTel or Datadog
 	// attribute. It stores the sorted, comma-joined Datadog peer concepts emitted
 	// by SetPeerTags; grouping remains a downstream concern.
-	keyFlattenedPeerTags = "otelmap.flattened.peer.tags"
+	keyDFFlattenedPeerTags = "_df.flattened.peer.tags"
 	// Peer system sources reuse the db/messaging/rpc system keys declared above.
 
 	keyNetworkProtocolName = string(semconv1_41.NetworkProtocolNameKey)

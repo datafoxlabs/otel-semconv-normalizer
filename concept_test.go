@@ -14,6 +14,7 @@ func TestConceptValues(t *testing.T) {
 		{name: "resource name", got: ConceptResourceName, want: "resource.name"},
 		{name: "peer service", got: ConceptPeerService, want: "peer.service"},
 		{name: "peer hostname", got: ConceptPeerHostname, want: "peer.hostname"},
+		{name: "peer port", got: ConceptPeerPort, want: "peer.port"},
 		{name: "peer DB name", got: ConceptPeerDBName, want: "peer.db.name"},
 		{name: "peer DB system", got: ConceptPeerDBSystem, want: "peer.db.system"},
 		{name: "peer messaging destination", got: ConceptPeerMessagingDestination, want: "peer.messaging.destination"},
